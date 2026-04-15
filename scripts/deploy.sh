@@ -27,7 +27,7 @@ err()  { echo -e "${RED}✗${NC} $*"; }
 STACK_NAME="hermes-agent"
 REGION=""
 KEY_NAME=""
-INSTANCE_TYPE="t3.medium"
+INSTANCE_TYPE="t3.large"
 SSH_CIDR="0.0.0.0/0"
 ENABLE_BEDROCK="true"
 INSTALL_LITELLM="true"
@@ -233,6 +233,20 @@ if [ -t 0 ]; then
         echo "Cancelled."
         exit 0
     fi
+fi
+
+# Check for existing stack and delete if found
+EXISTING_STATUS=$(aws cloudformation describe-stacks \
+    --stack-name "$STACK_NAME" --region "$REGION" \
+    --query 'Stacks[0].StackStatus' --output text 2>/dev/null || echo "NOT_FOUND")
+
+if [ "$EXISTING_STATUS" != "NOT_FOUND" ]; then
+    warn "Existing stack '$STACK_NAME' found (status: $EXISTING_STATUS)"
+    log "Deleting existing stack..."
+    aws cloudformation delete-stack --stack-name "$STACK_NAME" --region "$REGION"
+    log "Waiting for stack deletion..."
+    aws cloudformation wait stack-delete-complete --stack-name "$STACK_NAME" --region "$REGION"
+    ok "Existing stack deleted"
 fi
 
 log "Creating stack..."

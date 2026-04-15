@@ -59,7 +59,7 @@ Parameters:
 
   InstanceType:
     Type: String
-    Default: t3.medium
+    Default: t3.large
     AllowedValues:
       - t3.micro
       - t3.small
@@ -132,6 +132,11 @@ Parameters:
     Default: main
     Description: Git branch of hermes-agent to install
 
+  LatestUbuntuAmi:
+    Type: 'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
+    Default: '/aws/service/canonical/ubuntu/server/22.04/stable/current/amd64/hvm/ebs-gp2/ami-id'
+    Description: Latest Ubuntu 22.04 LTS AMI (auto-resolved via SSM)
+
   VpcId:
     Type: String
     Default: ''
@@ -150,29 +155,6 @@ Parameters:
 Conditions:
   CreateBedrockRole: !Equals [!Ref EnableBedrockAccess, 'true']
   ShouldInstallLiteLLM: !Equals [!Ref InstallLiteLLM, 'true']
-  UseDefaultVpc: !Equals [!Ref VpcId, '']
-
-# ============================================================================
-# Mappings - Ubuntu 22.04 LTS AMI per region
-# ============================================================================
-Mappings:
-  RegionAMI:
-    us-east-1:
-      AMI: ami-0c7217cdde317cfec
-    us-west-2:
-      AMI: ami-03f65b8614a860c29
-    eu-west-1:
-      AMI: ami-0905a3c97561e0b69
-    eu-west-3:
-      AMI: ami-01d21b7be69801c2f
-    eu-central-1:
-      AMI: ami-0faab6bdbac9486fb
-    ap-southeast-1:
-      AMI: ami-005c9e06a21d032e4
-    ap-northeast-1:
-      AMI: ami-07c589821f2b353aa
-    ap-south-1:
-      AMI: ami-03f4878755434977f
 
 # ============================================================================
 # Resources
@@ -199,11 +181,10 @@ Resources:
           Value: hermes-agent
 
   # --------------------------------------------------------------------------
-  # IAM Role for Bedrock Access
+  # IAM Role (always created for CFN signal; Bedrock permissions conditional)
   # --------------------------------------------------------------------------
   HermesInstanceRole:
     Type: AWS::IAM::Role
-    Condition: CreateBedrockRole
     Properties:
       RoleName: !Sub '${AWS::StackName}-role'
       AssumeRolePolicyDocument:
@@ -215,31 +196,31 @@ Resources:
             Action: sts:AssumeRole
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
-      Policies:
-        - PolicyName: BedrockAccess
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              - Sid: BedrockInvoke
-                Effect: Allow
-                Action:
-                  - bedrock:InvokeModel
-                  - bedrock:InvokeModelWithResponseStream
-                  - bedrock:ListFoundationModels
-                  - bedrock:GetFoundationModel
-                Resource: '*'
-              - Sid: CloudFormationSignal
-                Effect: Allow
-                Action:
-                  - cloudformation:SignalResource
-                Resource: !Sub 'arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${AWS::StackName}/*'
       Tags:
         - Key: Name
           Value: !Sub '${AWS::StackName}-role'
 
+  BedrockPolicy:
+    Type: AWS::IAM::Policy
+    Condition: CreateBedrockRole
+    Properties:
+      PolicyName: BedrockAccess
+      Roles:
+        - !Ref HermesInstanceRole
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: BedrockInvoke
+            Effect: Allow
+            Action:
+              - bedrock:InvokeModel
+              - bedrock:InvokeModelWithResponseStream
+              - bedrock:ListFoundationModels
+              - bedrock:GetFoundationModel
+            Resource: '*'
+
   HermesInstanceProfile:
     Type: AWS::IAM::InstanceProfile
-    Condition: CreateBedrockRole
     Properties:
       InstanceProfileName: !Sub '${AWS::StackName}-profile'
       Roles:
@@ -250,19 +231,13 @@ Resources:
   # --------------------------------------------------------------------------
   HermesInstance:
     Type: AWS::EC2::Instance
-    CreationPolicy:
-      ResourceSignal:
-        Timeout: PT20M
     Properties:
-      ImageId: !FindInMap [RegionAMI, !Ref 'AWS::Region', AMI]
+      ImageId: !Ref LatestUbuntuAmi
       InstanceType: !Ref InstanceType
       KeyName: !Ref KeyPairName
       SecurityGroupIds:
         - !GetAtt HermesSecurityGroup.GroupId
-      IamInstanceProfile: !If
-        - CreateBedrockRole
-        - !Ref HermesInstanceProfile
-        - !Ref 'AWS::NoValue'
+      IamInstanceProfile: !Ref HermesInstanceProfile
       BlockDeviceMappings:
         - DeviceName: /dev/sda1
           Ebs:
@@ -289,92 +264,114 @@ Resources:
           echo " Started:  $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
           echo "========================================================="
 
-          # ── Signal helper ──
-          signal_cfn() {
-            local status="$1"
-            aws cloudformation signal-resource \
-              --stack-name "${AWS::StackName}" \
-              --logical-resource-id HermesInstance \
-              --status "$status" \
-              --region "${AWS::Region}" 2>/dev/null || true
-          }
-          trap 'signal_cfn FAILURE' ERR
+          # ── Kill unattended-upgrades to free dpkg lock immediately ──
+          echo ">>> Waiting for dpkg lock to be released..."
+          while fuser /var/lib/dpkg/lock-frontend &>/dev/null 2>&1; do
+            echo "    dpkg lock held, waiting 5s..."
+            sleep 5
+          done
+          echo ">>> dpkg lock is free"
 
-          # ── System update ──
+          # ── Global apt settings ──
           export DEBIAN_FRONTEND=noninteractive
-          echo ">>> Updating system packages..."
-          apt-get update -qq
-          apt-get upgrade -y -qq -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold"
 
-          # ── System dependencies ──
-          echo ">>> Installing system dependencies..."
+          # ── Single apt-get update + all system packages at once ──
+          echo ">>> Installing all system packages..."
+          apt-get update -qq
           apt-get install -y -qq \
-            git curl wget unzip jq \
+            unzip curl git wget jq \
             build-essential python3-dev python3-pip python3-venv libffi-dev \
             ripgrep ffmpeg
 
-          # ── Node.js 22 LTS ──
-          echo ">>> Installing Node.js 22 LTS..."
-          curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
-          apt-get install -y -qq nodejs
+          # ── Parallel downloads: AWS CLI + Node.js setup + uv installer ──
+          echo ">>> Downloading AWS CLI, Node.js setup, uv in parallel..."
+          curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip &
+          curl -fsSL https://deb.nodesource.com/setup_22.x -o /tmp/node_setup.sh &
+          sudo -u ubuntu bash -c 'curl -LsSf https://astral.sh/uv/install.sh | sh' &
+          wait
+          echo ">>> Downloads complete"
 
-          # ── AWS CLI v2 ──
+          # ── Install AWS CLI v2 ──
           if ! command -v aws &>/dev/null; then
             echo ">>> Installing AWS CLI v2..."
-            curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip
             unzip -q /tmp/awscliv2.zip -d /tmp
             /tmp/aws/install
             rm -rf /tmp/aws /tmp/awscliv2.zip
           fi
 
-          # ── Hermes Agent ──
-          echo ">>> Installing Hermes Agent..."
-          sudo -u ubuntu bash << 'HERMES_EOF'
+          # ── Install Node.js 22 LTS ──
+          echo ">>> Installing Node.js 22 LTS..."
+          bash /tmp/node_setup.sh
+          apt-get install -y -qq nodejs
+          rm -f /tmp/node_setup.sh
+
+          # ── Parallel: Hermes Agent + LiteLLM pip install ──
+          echo ">>> Installing Hermes Agent & LiteLLM in parallel..."
+
+          sudo -u ubuntu bash << 'HERMES_EOF' > /var/log/hermes-agent-install.log 2>&1 &
           set -euo pipefail
           cd /home/ubuntu
-
-          # Install uv
-          curl -LsSf https://astral.sh/uv/install.sh | sh
           export PATH="$HOME/.local/bin:$PATH"
-
-          # Official installer (non-interactive)
           curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/${HermesAgentBranch}/scripts/install.sh \
             | bash -s -- --skip-setup
-
-          # Verify
           export PATH="$HOME/.local/bin:$PATH"
           hermes --version
-          HERMES_EOF
           echo ">>> Hermes Agent installed"
+          HERMES_EOF
+          HERMES_PID=$!
 
-          # ── LiteLLM Proxy (conditional) ──
+          LITELLM_PID=""
           if [ "${InstallLiteLLM}" = "true" ]; then
-            echo ">>> Installing LiteLLM proxy..."
-
-            sudo -u ubuntu bash << 'LITELLM_EOF'
+            sudo -u ubuntu bash << 'LITELLM_EOF' > /var/log/litellm-install.log 2>&1 &
           set -euo pipefail
-          export PATH="$HOME/.local/bin:$HOME/.hermes/hermes-agent/venv/bin:$PATH"
-          pip install 'litellm[proxy]'
+          export PATH="$HOME/.local/bin:$PATH"
+          export PIP_CACHE_DIR="$HOME/.cache/pip-litellm"
+          pip install --user 'litellm[proxy]'
+          echo ">>> LiteLLM pip install complete"
+          LITELLM_EOF
+            LITELLM_PID=$!
+          fi
 
+          # Wait for parallel installs and check results
+          if ! wait $HERMES_PID; then
+            echo ">>> ERROR: Hermes Agent install failed. Log:"
+            cat /var/log/hermes-agent-install.log
+            exit 1
+          fi
+          cat /var/log/hermes-agent-install.log
+          echo ">>> Hermes Agent ready"
+
+          # ── LiteLLM Proxy config (conditional) ──
+          if [ -n "$LITELLM_PID" ]; then
+            if ! wait $LITELLM_PID; then
+              echo ">>> ERROR: LiteLLM install failed. Log:"
+              cat /var/log/litellm-install.log
+              exit 1
+            fi
+            cat /var/log/litellm-install.log
+            echo ">>> LiteLLM ready"
+
+            sudo -u ubuntu bash << 'LITELLM_CFG_EOF'
+          set -euo pipefail
           cat > ~/litellm_config.yaml << LCFG
           model_list:
             - model_name: "claude-sonnet"
               litellm_params:
-                model: bedrock/anthropic.claude-sonnet-4-20250514-v1:0
+                model: bedrock/global.anthropic.claude-sonnet-4-6
                 aws_region_name: ${BedrockRegion}
             - model_name: "claude-haiku"
               litellm_params:
-                model: bedrock/anthropic.claude-3-5-haiku-20241022-v1:0
+                model: bedrock/global.anthropic.claude-haiku-4-5-20251001-v1:0
                 aws_region_name: ${BedrockRegion}
             - model_name: "claude-opus"
               litellm_params:
-                model: bedrock/anthropic.claude-opus-4-20250514-v1:0
+                model: bedrock/global.anthropic.claude-opus-4-6-v1
                 aws_region_name: ${BedrockRegion}
 
           general_settings:
             master_key: null
           LCFG
-          LITELLM_EOF
+          LITELLM_CFG_EOF
 
             # Systemd service for LiteLLM
             cat > /etc/systemd/system/litellm.service << 'LSVC'
@@ -496,9 +493,6 @@ Resources:
           echo " ✅ Deployment complete: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
           echo "========================================================="
 
-          # ── Signal SUCCESS ──
-          signal_cfn SUCCESS
-
 # ============================================================================
 # Outputs
 # ============================================================================
@@ -529,6 +523,5 @@ Outputs:
     Value: !GetAtt HermesSecurityGroup.GroupId
 
   IAMRoleArn:
-    Condition: CreateBedrockRole
-    Description: IAM Role ARN with Bedrock permissions
+    Description: IAM Role ARN
     Value: !GetAtt HermesInstanceRole.Arn
