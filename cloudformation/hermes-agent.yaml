@@ -1,0 +1,536 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Hermes Agent - One-Click Deployment on EC2
+  Deploys an Ubuntu 22.04 instance with Hermes Agent fully installed.
+  Includes optional AWS Bedrock access via IAM Role and LiteLLM proxy.
+
+# ============================================================================
+# Metadata - Console Parameter Grouping
+# ============================================================================
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: "🖥️ Instance Configuration"
+        Parameters:
+          - KeyPairName
+          - InstanceType
+          - VolumeSize
+          - SSHAllowCIDR
+      - Label:
+          default: "🤖 AI Model Configuration"
+        Parameters:
+          - EnableBedrockAccess
+          - InstallLiteLLM
+          - BedrockRegion
+          - DefaultBedrockModel
+      - Label:
+          default: "⚙️ Advanced"
+        Parameters:
+          - HermesAgentBranch
+          - VpcId
+          - SubnetId
+    ParameterLabels:
+      KeyPairName:
+        default: "SSH Key Pair"
+      InstanceType:
+        default: "Instance Type"
+      VolumeSize:
+        default: "Disk Size (GB)"
+      SSHAllowCIDR:
+        default: "SSH Allow CIDR"
+      EnableBedrockAccess:
+        default: "Enable Bedrock Access"
+      InstallLiteLLM:
+        default: "Install LiteLLM Proxy"
+      BedrockRegion:
+        default: "Bedrock Region"
+      DefaultBedrockModel:
+        default: "Default Bedrock Model"
+
+# ============================================================================
+# Parameters
+# ============================================================================
+Parameters:
+  KeyPairName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: Existing EC2 Key Pair for SSH access
+    ConstraintDescription: Must be an existing EC2 Key Pair in this region
+
+  InstanceType:
+    Type: String
+    Default: t3.medium
+    AllowedValues:
+      - t3.micro
+      - t3.small
+      - t3.medium
+      - t3.large
+      - t3.xlarge
+      - t3.2xlarge
+      - m6i.large
+      - m6i.xlarge
+      - m6i.2xlarge
+      - c6i.large
+      - c6i.xlarge
+      - g5.xlarge
+      - g5.2xlarge
+    Description: >
+      t3.medium (2 vCPU/4GB) for CLI use.
+      g5.xlarge for local GPU model inference.
+
+  VolumeSize:
+    Type: Number
+    Default: 30
+    MinValue: 20
+    MaxValue: 500
+    Description: Root EBS volume size in GB
+
+  SSHAllowCIDR:
+    Type: String
+    Default: 0.0.0.0/0
+    AllowedPattern: ^(\d{1,3}\.){3}\d{1,3}/\d{1,2}$
+    Description: >
+      CIDR block for SSH access. Use your IP/32 for security.
+
+  EnableBedrockAccess:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    Description: Attach IAM Role with Bedrock InvokeModel permissions
+
+  InstallLiteLLM:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    Description: Install LiteLLM proxy for Bedrock model access
+
+  BedrockRegion:
+    Type: String
+    Default: us-east-1
+    AllowedValues:
+      - us-east-1
+      - us-west-2
+      - eu-west-1
+      - eu-west-3
+      - eu-central-1
+      - ap-southeast-1
+      - ap-northeast-1
+      - ap-south-1
+    Description: AWS region for Bedrock API calls
+
+  DefaultBedrockModel:
+    Type: String
+    Default: claude-sonnet
+    AllowedValues:
+      - claude-sonnet
+      - claude-haiku
+      - claude-opus
+    Description: Default model alias for Hermes to use
+
+  HermesAgentBranch:
+    Type: String
+    Default: main
+    Description: Git branch of hermes-agent to install
+
+  VpcId:
+    Type: String
+    Default: ''
+    Description: >
+      (Optional) VPC ID. Leave empty to use default VPC.
+
+  SubnetId:
+    Type: String
+    Default: ''
+    Description: >
+      (Optional) Subnet ID. Leave empty for auto-selection.
+
+# ============================================================================
+# Conditions
+# ============================================================================
+Conditions:
+  CreateBedrockRole: !Equals [!Ref EnableBedrockAccess, 'true']
+  ShouldInstallLiteLLM: !Equals [!Ref InstallLiteLLM, 'true']
+  UseDefaultVpc: !Equals [!Ref VpcId, '']
+
+# ============================================================================
+# Mappings - Ubuntu 22.04 LTS AMI per region
+# ============================================================================
+Mappings:
+  RegionAMI:
+    us-east-1:
+      AMI: ami-0c7217cdde317cfec
+    us-west-2:
+      AMI: ami-03f65b8614a860c29
+    eu-west-1:
+      AMI: ami-0905a3c97561e0b69
+    eu-west-3:
+      AMI: ami-01d21b7be69801c2f
+    eu-central-1:
+      AMI: ami-0faab6bdbac9486fb
+    ap-southeast-1:
+      AMI: ami-005c9e06a21d032e4
+    ap-northeast-1:
+      AMI: ami-07c589821f2b353aa
+    ap-south-1:
+      AMI: ami-03f4878755434977f
+
+# ============================================================================
+# Resources
+# ============================================================================
+Resources:
+
+  # --------------------------------------------------------------------------
+  # Security Group
+  # --------------------------------------------------------------------------
+  HermesSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub '${AWS::StackName} - Hermes Agent SSH access'
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref SSHAllowCIDR
+          Description: SSH access
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-sg'
+        - Key: Project
+          Value: hermes-agent
+
+  # --------------------------------------------------------------------------
+  # IAM Role for Bedrock Access
+  # --------------------------------------------------------------------------
+  HermesInstanceRole:
+    Type: AWS::IAM::Role
+    Condition: CreateBedrockRole
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: BedrockAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: BedrockInvoke
+                Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                  - bedrock:InvokeModelWithResponseStream
+                  - bedrock:ListFoundationModels
+                  - bedrock:GetFoundationModel
+                Resource: '*'
+              - Sid: CloudFormationSignal
+                Effect: Allow
+                Action:
+                  - cloudformation:SignalResource
+                Resource: !Sub 'arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${AWS::StackName}/*'
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-role'
+
+  HermesInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Condition: CreateBedrockRole
+    Properties:
+      InstanceProfileName: !Sub '${AWS::StackName}-profile'
+      Roles:
+        - !Ref HermesInstanceRole
+
+  # --------------------------------------------------------------------------
+  # EC2 Instance
+  # --------------------------------------------------------------------------
+  HermesInstance:
+    Type: AWS::EC2::Instance
+    CreationPolicy:
+      ResourceSignal:
+        Timeout: PT20M
+    Properties:
+      ImageId: !FindInMap [RegionAMI, !Ref 'AWS::Region', AMI]
+      InstanceType: !Ref InstanceType
+      KeyName: !Ref KeyPairName
+      SecurityGroupIds:
+        - !GetAtt HermesSecurityGroup.GroupId
+      IamInstanceProfile: !If
+        - CreateBedrockRole
+        - !Ref HermesInstanceProfile
+        - !Ref 'AWS::NoValue'
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            VolumeSize: !Ref VolumeSize
+            VolumeType: gp3
+            Iops: 3000
+            Throughput: 125
+            DeleteOnTermination: true
+            Encrypted: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}'
+        - Key: Project
+          Value: hermes-agent
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -euo pipefail
+          exec > /var/log/hermes-install.log 2>&1
+
+          echo "========================================================="
+          echo " Hermes Agent CloudFormation Deployment"
+          echo " Stack:    ${AWS::StackName}"
+          echo " Region:   ${AWS::Region}"
+          echo " Instance: ${InstanceType}"
+          echo " Started:  $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+          echo "========================================================="
+
+          # ── Signal helper ──
+          signal_cfn() {
+            local status="$1"
+            aws cloudformation signal-resource \
+              --stack-name "${AWS::StackName}" \
+              --logical-resource-id HermesInstance \
+              --status "$status" \
+              --region "${AWS::Region}" 2>/dev/null || true
+          }
+          trap 'signal_cfn FAILURE' ERR
+
+          # ── System update ──
+          export DEBIAN_FRONTEND=noninteractive
+          echo ">>> Updating system packages..."
+          apt-get update -qq
+          apt-get upgrade -y -qq -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold"
+
+          # ── System dependencies ──
+          echo ">>> Installing system dependencies..."
+          apt-get install -y -qq \
+            git curl wget unzip jq \
+            build-essential python3-dev python3-pip python3-venv libffi-dev \
+            ripgrep ffmpeg
+
+          # ── Node.js 22 LTS ──
+          echo ">>> Installing Node.js 22 LTS..."
+          curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+          apt-get install -y -qq nodejs
+
+          # ── AWS CLI v2 ──
+          if ! command -v aws &>/dev/null; then
+            echo ">>> Installing AWS CLI v2..."
+            curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip
+            unzip -q /tmp/awscliv2.zip -d /tmp
+            /tmp/aws/install
+            rm -rf /tmp/aws /tmp/awscliv2.zip
+          fi
+
+          # ── Hermes Agent ──
+          echo ">>> Installing Hermes Agent..."
+          sudo -u ubuntu bash << 'HERMES_EOF'
+          set -euo pipefail
+          cd /home/ubuntu
+
+          # Install uv
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          export PATH="$HOME/.local/bin:$PATH"
+
+          # Official installer (non-interactive)
+          curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/${HermesAgentBranch}/scripts/install.sh \
+            | bash -s -- --skip-setup
+
+          # Verify
+          export PATH="$HOME/.local/bin:$PATH"
+          hermes --version
+          HERMES_EOF
+          echo ">>> Hermes Agent installed"
+
+          # ── LiteLLM Proxy (conditional) ──
+          if [ "${InstallLiteLLM}" = "true" ]; then
+            echo ">>> Installing LiteLLM proxy..."
+
+            sudo -u ubuntu bash << 'LITELLM_EOF'
+          set -euo pipefail
+          export PATH="$HOME/.local/bin:$HOME/.hermes/hermes-agent/venv/bin:$PATH"
+          pip install 'litellm[proxy]'
+
+          cat > ~/litellm_config.yaml << LCFG
+          model_list:
+            - model_name: "claude-sonnet"
+              litellm_params:
+                model: bedrock/anthropic.claude-sonnet-4-20250514-v1:0
+                aws_region_name: ${BedrockRegion}
+            - model_name: "claude-haiku"
+              litellm_params:
+                model: bedrock/anthropic.claude-3-5-haiku-20241022-v1:0
+                aws_region_name: ${BedrockRegion}
+            - model_name: "claude-opus"
+              litellm_params:
+                model: bedrock/anthropic.claude-opus-4-20250514-v1:0
+                aws_region_name: ${BedrockRegion}
+
+          general_settings:
+            master_key: null
+          LCFG
+          LITELLM_EOF
+
+            # Systemd service for LiteLLM
+            cat > /etc/systemd/system/litellm.service << 'LSVC'
+          [Unit]
+          Description=LiteLLM Proxy - Bedrock Gateway
+          After=network-online.target
+          Wants=network-online.target
+
+          [Service]
+          Type=simple
+          User=ubuntu
+          WorkingDirectory=/home/ubuntu
+          Environment=PATH=/home/ubuntu/.local/bin:/home/ubuntu/.hermes/hermes-agent/venv/bin:/usr/local/bin:/usr/bin:/bin
+          ExecStart=/home/ubuntu/.local/bin/litellm --config /home/ubuntu/litellm_config.yaml --port 4000
+          Restart=on-failure
+          RestartSec=5
+          StandardOutput=journal
+          StandardError=journal
+
+          [Install]
+          WantedBy=multi-user.target
+          LSVC
+            systemctl daemon-reload
+            systemctl enable --now litellm
+            echo ">>> LiteLLM proxy running on port 4000"
+
+            # Pre-configure Hermes to use Bedrock
+            sudo -u ubuntu bash << 'HCFG_EOF'
+          export PATH="$HOME/.local/bin:$PATH"
+          sleep 5  # Wait for LiteLLM to start
+          hermes config set model.provider custom
+          hermes config set model.default ${DefaultBedrockModel}
+          hermes config set model.base_url http://localhost:4000/v1
+          hermes config set model.context_length 200000
+          echo ">>> Hermes pre-configured for Bedrock"
+          HCFG_EOF
+          fi
+
+          # ── Hermes Gateway systemd ──
+          cat > /etc/systemd/system/hermes-gateway.service << 'GSVC'
+          [Unit]
+          Description=Hermes Agent Messaging Gateway
+          After=network-online.target litellm.service
+          Wants=network-online.target
+
+          [Service]
+          Type=simple
+          User=ubuntu
+          WorkingDirectory=/home/ubuntu
+          Environment=PATH=/home/ubuntu/.local/bin:/home/ubuntu/.hermes/node/bin:/usr/local/bin:/usr/bin:/bin
+          ExecStart=/home/ubuntu/.local/bin/hermes gateway
+          Restart=on-failure
+          RestartSec=10
+
+          [Install]
+          WantedBy=multi-user.target
+          GSVC
+          systemctl daemon-reload
+
+          # ── MOTD ──
+          cat > /etc/update-motd.d/99-hermes << 'MOTD'
+          #!/bin/bash
+          echo ""
+          echo "  ☤  Hermes Agent is installed!"
+          echo ""
+          echo "  Quick Start:"
+          echo "    hermes setup     # First-time configuration wizard"
+          echo "    hermes           # Start chatting"
+          echo ""
+          echo "  Bedrock Status:"
+          if systemctl is-active --quiet litellm 2>/dev/null; then
+            echo "    ✅ LiteLLM proxy running on :4000"
+          else
+            echo "    ⚠️  LiteLLM proxy not running"
+          fi
+          echo ""
+          echo "  Docs: cat ~/QUICKSTART.md"
+          echo ""
+          MOTD
+          chmod +x /etc/update-motd.d/99-hermes
+
+          # ── Quick Start Guide ──
+          cat > /home/ubuntu/QUICKSTART.md << 'QS'
+          # ☤ Hermes Agent — Quick Start
+
+          ## 1. First-Time Setup
+          hermes setup       # Configure LLM provider & API keys
+          hermes             # Start chatting
+
+          ## 2. Using Bedrock Models (pre-configured)
+          # Hermes is already configured to use Bedrock via LiteLLM.
+          # Just start chatting — no API keys needed!
+          hermes
+
+          # Switch models in conversation:
+          /model custom:claude-sonnet
+          /model custom:claude-opus
+          /model custom:claude-haiku
+
+          ## 3. Messaging Gateway (Telegram/Discord/Slack)
+          hermes gateway setup
+          sudo systemctl enable --now hermes-gateway
+
+          ## 4. Service Management
+          sudo systemctl status litellm           # LiteLLM proxy
+          sudo systemctl status hermes-gateway    # Messaging gateway
+          journalctl -u litellm -f               # LiteLLM logs
+          journalctl -u hermes-gateway -f        # Gateway logs
+
+          ## 5. Useful Commands
+          hermes model       # Switch model
+          hermes tools       # Configure tools
+          hermes doctor      # Diagnose issues
+          hermes update      # Update Hermes
+          QS
+          chown ubuntu:ubuntu /home/ubuntu/QUICKSTART.md
+
+          echo "========================================================="
+          echo " ✅ Deployment complete: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+          echo "========================================================="
+
+          # ── Signal SUCCESS ──
+          signal_cfn SUCCESS
+
+# ============================================================================
+# Outputs
+# ============================================================================
+Outputs:
+  InstanceId:
+    Description: EC2 Instance ID
+    Value: !Ref HermesInstance
+
+  PublicIP:
+    Description: Instance public IP
+    Value: !GetAtt HermesInstance.PublicIp
+
+  SSHCommand:
+    Description: SSH connection command
+    Value: !Sub 'ssh ubuntu@${HermesInstance.PublicIp}'
+
+  SetupCommand:
+    Description: Run after SSH to complete setup
+    Value: 'hermes setup && hermes'
+
+  LiteLLMStatus:
+    Condition: ShouldInstallLiteLLM
+    Description: LiteLLM proxy endpoint
+    Value: !Sub 'http://${HermesInstance.PublicIp}:4000 (internal only, not exposed)'
+
+  SecurityGroupId:
+    Description: Security Group ID
+    Value: !GetAtt HermesSecurityGroup.GroupId
+
+  IAMRoleArn:
+    Condition: CreateBedrockRole
+    Description: IAM Role ARN with Bedrock permissions
+    Value: !GetAtt HermesInstanceRole.Arn
