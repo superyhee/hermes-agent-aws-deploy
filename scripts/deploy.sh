@@ -5,6 +5,9 @@
 # ============================================================================
 set -euo pipefail
 
+# Disable AWS CLI pager to prevent blocking on output
+export AWS_PAGER=""
+
 # Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -30,6 +33,7 @@ ENABLE_BEDROCK="true"
 INSTALL_LITELLM="true"
 BEDROCK_REGION=""
 TEMPLATE="full"
+SSH_CIDR_USER_SET=false
 DRY_RUN=false
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -75,7 +79,7 @@ while [[ $# -gt 0 ]]; do
         --key)             KEY_NAME="$2"; shift 2 ;;
         --stack)           STACK_NAME="$2"; shift 2 ;;
         --instance-type)   INSTANCE_TYPE="$2"; shift 2 ;;
-        --ssh-cidr)        SSH_CIDR="$2"; shift 2 ;;
+        --ssh-cidr)        SSH_CIDR="$2"; SSH_CIDR_USER_SET=true; shift 2 ;;
         --no-bedrock)      ENABLE_BEDROCK="false"; INSTALL_LITELLM="false"; shift ;;
         --bedrock-region)  BEDROCK_REGION="$2"; shift 2 ;;
         --minimal)         TEMPLATE="minimal"; shift ;;
@@ -132,21 +136,23 @@ if [ -z "$BEDROCK_REGION" ]; then
 fi
 
 if [ -z "$KEY_NAME" ]; then
+    KEY_NAME="${STACK_NAME}-key"
     echo ""
-    log "Available Key Pairs in $REGION:"
-    aws ec2 describe-key-pairs --region "$REGION" \
-        --query 'KeyPairs[*].KeyName' --output table 2>/dev/null || true
-    echo ""
-    read -p "Enter Key Pair name: " KEY_NAME
-    if [ -z "$KEY_NAME" ]; then
-        err "Key Pair name is required"
-        exit 1
-    fi
+    log "Creating Key Pair: $KEY_NAME ..."
+    KEY_FILE="$REPO_DIR/${KEY_NAME}.pem"
+    # Clean up existing key pair and local file
+    aws ec2 delete-key-pair --key-name "$KEY_NAME" --region "$REGION" &>/dev/null || true
+    rm -f "$KEY_FILE"
+    aws ec2 create-key-pair --key-name "$KEY_NAME" --region "$REGION" \
+        --query 'KeyMaterial' --output text > "$KEY_FILE"
+    chmod 400 "$KEY_FILE"
+    ok "Key Pair created: $KEY_NAME"
+    ok "Private key saved: $KEY_FILE"
 fi
 ok "Key Pair: $KEY_NAME"
 
-# Detect public IP for SSH CIDR suggestion
-if [ "$SSH_CIDR" = "0.0.0.0/0" ]; then
+# Detect public IP for SSH CIDR suggestion (only if not set via --ssh-cidr)
+if [ "$SSH_CIDR" = "0.0.0.0/0" ] && [ "$SSH_CIDR_USER_SET" = false ] && [ -t 0 ]; then
     MY_IP=$(curl -s --max-time 5 https://checkip.amazonaws.com 2>/dev/null || echo "")
     if [ -n "$MY_IP" ]; then
         echo ""
@@ -221,10 +227,12 @@ if [ "$DRY_RUN" = true ]; then
     exit 0
 fi
 
-read -p "Deploy now? [Y/n]: " confirm
-if [[ ! "${confirm:-Y}" =~ ^[Yy]$ ]]; then
-    echo "Cancelled."
-    exit 0
+if [ -t 0 ]; then
+    read -p "Deploy now? [Y/n]: " confirm
+    if [[ ! "${confirm:-Y}" =~ ^[Yy]$ ]]; then
+        echo "Cancelled."
+        exit 0
+    fi
 fi
 
 log "Creating stack..."
@@ -254,7 +262,11 @@ if aws cloudformation wait stack-create-complete \
     echo "  Public IP:  $PUBLIC_IP"
     echo ""
     echo "  Connect:"
-    echo "    ssh ubuntu@$PUBLIC_IP"
+    if [ -n "${KEY_FILE:-}" ]; then
+        echo "    ssh -i $KEY_FILE ubuntu@$PUBLIC_IP"
+    else
+        echo "    ssh ubuntu@$PUBLIC_IP"
+    fi
     echo ""
     echo "  First-time setup:"
     echo "    hermes setup"

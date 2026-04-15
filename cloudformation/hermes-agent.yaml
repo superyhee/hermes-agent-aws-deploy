@@ -268,8 +268,6 @@ Resources:
           Ebs:
             VolumeSize: !Ref VolumeSize
             VolumeType: gp3
-            Iops: 3000
-            Throughput: 125
             DeleteOnTermination: true
             Encrypted: true
       Tags:
