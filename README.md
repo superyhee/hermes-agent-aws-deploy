@@ -1,328 +1,308 @@
-<div align="center">
-
 # ☤ Hermes Agent — AWS One-Click Deploy
 
-**Deploy [Hermes Agent](https://github.com/NousResearch/hermes-agent) on AWS EC2 with a single command.**
-
-CloudFormation templates with optional **AWS Bedrock** integration via LiteLLM proxy.
-
-[![Deploy to AWS](https://img.shields.io/badge/Deploy%20to-AWS-FF9900?style=for-the-badge&logo=amazonaws&logoColor=white)](#-quick-start)
-[![Hermes Agent](https://img.shields.io/badge/Hermes%20Agent-v0.9.0-blueviolet?style=for-the-badge)](https://github.com/NousResearch/hermes-agent)
-[![License: MIT](https://img.shields.io/badge/License-MIT-green?style=for-the-badge)](LICENSE)
-
-</div>
-
----
+Deploy [Hermes Agent](https://github.com/NousResearch/hermes-agent) on AWS EC2 with **AWS Bedrock** as the LLM backend and **WeChat** as the messaging gateway — in a single command.
 
 ## What This Does
 
-- 🚀 **One command** → Running Hermes Agent instance on AWS
-- ☁️ **Bedrock integration** → Use Claude via IAM auth (no API keys needed)
-- 🔒 **Secure by default** → Encrypted EBS, restricted SSH, IAM least-privilege
-- 📱 **Multi-channel ready** → Pre-configured systemd services for Telegram/Discord/Slack gateway
-
-## Architecture
-
 ```
-┌─────────────────────────────────────────────────────────────┐
-│  EC2 Instance (Ubuntu 22.04 LTS)                            │
-│                                                             │
-│  ┌──────────────┐    ┌──────────────┐    ┌───────────────┐  │
-│  │ Hermes Agent │───▶│ LiteLLM Proxy│───▶│ AWS Bedrock   │  │
-│  │  (CLI/Gateway)│    │  :4000       │    │ (Claude, etc) │  │
-│  └──────────────┘    └──────────────┘    └───────────────┘  │
-│         │                    │                     ▲        │
-│         │                    │              IAM Role│        │
-│  ┌──────▼──────┐             │              (SigV4) │        │
-│  │  Telegram   │             │                     │        │
-│  │  Discord    │     OpenAI-compatible       ┌─────┴─────┐  │
-│  │  Slack      │         API                 │ IAM Role  │  │
-│  └─────────────┘                             │ (Bedrock) │  │
-│                                              └───────────┘  │
-└─────────────────────────────────────────────────────────────┘
+./deploy-hermes.sh
 ```
 
-## 🚀 Quick Start
+The script provisions a complete Hermes Agent stack on AWS:
 
-### Prerequisites
+| Component   | Detail                                           |
+| ----------- | ------------------------------------------------ |
+| **Compute** | EC2 Graviton3 ARM64 (configurable instance type) |
+| **LLM**     | AWS Bedrock — Claude Sonnet 4 via Converse API   |
+| **OS**      | Amazon Linux 2023                                |
+| **Gateway** | WeChat messaging with interactive QR login       |
+| **Runtime** | Python 3.11, uv, anthropic\[bedrock\], boto3     |
 
-- AWS CLI configured (`aws configure`)
-- An existing EC2 Key Pair in your target region
-- (Optional) [Bedrock model access](https://docs.aws.amazon.com/bedrock/latest/userguide/model-access.html) enabled for Claude
+After deployment, you can chat with Hermes directly through WeChat.
 
-### Option A: Interactive Deploy Script (Recommended)
+## Prerequisites
+
+- **AWS CLI** configured with credentials that have permissions for EC2, IAM, and Bedrock
+- **Bedrock model access** enabled for Claude Sonnet 4 in your target region ([request access](https://console.aws.amazon.com/bedrock/home#/modelaccess))
+- **WeChat** app on your phone (for QR code login)
+- **bash** 4+ and `ssh` available locally
+
+## Quick Start
 
 ```bash
-git clone https://github.com/yanghaws/hermes-agent-aws-deploy.git
-cd hermes-agent-aws-deploy
-chmod +x scripts/*.sh
+git clone https://github.com/<your-org>/hermes-deploy.git
+cd hermes-deploy
+chmod +x deploy-hermes.sh cleanup-hermes.sh
 
-./scripts/deploy.sh
+# Deploy (interactive region & instance type selection)
+./deploy-hermes.sh
+
+# When prompted, scan the QR code with WeChat to log in
 ```
 
-The script will guide you through region, key pair, and SSH settings.
+The script walks through 7 steps automatically:
 
-### Option B: One-Liner AWS CLI
+1. **IAM Role & Instance Profile** — creates a role with Bedrock + SSM permissions
+2. **SSH Key Pair** — generates an ED25519 key pair
+3. **Security Group** — opens port 22 for SSH access
+4. **Launch EC2 Instance** — starts the instance with cloud-init provisioning
+5. **Wait for Installation** — monitors cloud-init until Hermes is installed
+6. **Configure Bedrock** — sets Bedrock as the LLM provider and applies the auxiliary client patch
+7. **WeChat Gateway** — interactive QR login, then installs and starts the gateway as a systemd service
+
+### Deploy Demo
+
+```
+$ ./deploy-hermes.sh
+
+  Select Region:
+
+    ▸ 1) ap-southeast-1      Singapore
+      2) ap-northeast-1      Tokyo
+      3) ap-northeast-2      Seoul
+      4) ap-south-1          Mumbai
+      5) us-east-1           N. Virginia
+      6) us-west-2           Oregon
+      7) eu-west-1           Ireland
+      8) eu-central-1        Frankfurt
+
+  Enter number [default: ap-southeast-1]:
+
+  Select Instance Type:
+
+      1) c7g.medium      1 vCPU,  2 GiB  — Light testing
+      2) c7g.large       2 vCPU,  4 GiB  — Small scale
+    ▸ 3) c7g.xlarge      4 vCPU,  8 GiB  — Recommended (default)
+      4) c7g.2xlarge     8 vCPU, 16 GiB  — High concurrency
+      5) m7g.xlarge      4 vCPU, 16 GiB  — Memory intensive
+      6) m7g.2xlarge     8 vCPU, 32 GiB  — Memory + high concurrency
+
+  Enter number [default: c7g.xlarge]:
+
+[✓] Region: ap-southeast-1, Instance: c7g.xlarge
+
+══ Pre-flight Checks ══
+[✓] AWS Account: 123456789012
+[✓] Target Region: ap-southeast-1
+
+══ 1/7 — IAM Role & Instance Profile ══
+[✓] Creating IAM role hermes-agent-role...
+[✓] IAM policies configured
+[✓] Instance profile created (waiting 10s for propagation...)
+
+══ 2/7 — SSH Key Pair ══
+[✓] SSH key created: /Users/you/.ssh/hermes-agent-key.pem
+
+══ 3/7 — Security Group ══
+[✓] Security group created: sg-0a1b2c3d4e5f
+
+══ 4/7 — Launch EC2 Instance ══
+[✓] AMI: ami-0abcdef1234567890
+[✓] Instance launched: i-0a1b2c3d4e5f67890
+    Waiting for running state... done
+[✓] Public IP: 13.212.xxx.xxx
+
+══ 5/7 — Waiting for Hermes Installation ══
+    Waiting for SSH (timeout: 600s)......... connected
+    Waiting for cloud-init (timeout: 900s)............ done
+[✓] Installed: hermes-agent 0.3.x
+
+══ 6/7 — Configuring Hermes for AWS Bedrock ══
+[✓] Bedrock provider configured (model: apac.anthropic.claude-sonnet-4-20250514-v1:0)
+Bedrock auxiliary patch applied successfully
+[✓] Bedrock auxiliary patch applied
+[✓] Sudoers configured for gateway management
+[✓] Bedrock verified: model responded 'ok'
+
+══ 7/7 — WeChat Gateway Setup (QR Login) ══
+
+  WeChat QR code will be displayed next
+  Scan with WeChat to log in
+
+  Press Enter to start QR login...
+
+  ██████████████████████████████████
+  ██████████████████████████████████
+  ████ ▄▄▄▄▄ █ ▄▄ █ ▄▄█ ▄▄▄▄▄ ████
+  ████ █   █ █▄██ █▄▄ █ █   █ ████
+  ████ █▄▄▄█ █ ▄▄▄█▄▄ █ █▄▄▄█ ████
+  ████▄▄▄▄▄▄▄█ █▄█ █▄█▄▄▄▄▄▄▄████
+  ██████████████████████████████████
+  (scan with WeChat)
+
+  WeChat DM policy set to open, user wxid_xxx allowed
+● hermes-gateway.service - Hermes Agent Gateway
+   Active: active (running)
+
+╔══════════════════════════════════════════════════════════════╗
+║           ☤ Hermes Agent Deploy Complete!                    ║
+╚══════════════════════════════════════════════════════════════╝
+
+  Instance Info
+    Instance ID:  i-0a1b2c3d4e5f67890
+    Public IP:    13.212.xxx.xxx
+    Region:       ap-southeast-1
+    Model:        apac.anthropic.claude-sonnet-4-20250514-v1:0
+
+  Connect
+    ssh -i ~/.ssh/hermes-agent-key.pem ec2-user@13.212.xxx.xxx
+    sudo su - hermes
+    hermes    # Start interactive terminal
+
+  Gateway Management
+    sudo systemctl status hermes-gateway   # Check status
+    sudo systemctl restart hermes-gateway   # Restart
+    journalctl -u hermes-gateway -f         # Live logs
+
+  WeChat is ready — send a message to Hermes! 💬
+
+[✓] Deploy info saved to ~/.hermes-deploy-info
+```
+
+## Usage
+
+### Full Deploy
 
 ```bash
-aws cloudformation create-stack \
-  --stack-name hermes-agent \
-  --template-body file://cloudformation/hermes-agent.yaml \
-  --parameters \
-    ParameterKey=KeyPairName,ParameterValue=YOUR_KEY_NAME \
-    ParameterKey=SSHAllowCIDR,ParameterValue=YOUR_IP/32 \
-  --capabilities CAPABILITY_NAMED_IAM \
-  --region ap-southeast-1
-
-# Wait for completion (~10 minutes)
-aws cloudformation wait stack-create-complete \
-  --stack-name hermes-agent --region ap-southeast-1
-
-# Get connection info
-aws cloudformation describe-stacks \
-  --stack-name hermes-agent --region ap-southeast-1 \
-  --query 'Stacks[0].Outputs' --output table
+./deploy-hermes.sh
 ```
 
-### Option C: AWS Console
+You'll be prompted to select a region and instance type interactively. Press Enter to accept defaults.
 
-1. Open [CloudFormation Console](https://console.aws.amazon.com/cloudformation)
-2. Click **Create stack** → **With new resources**
-3. Upload `cloudformation/hermes-agent.yaml`
-4. Fill in parameters and deploy
-
----
-
-## 📋 Configuration Wizard
-
-### After Deployment
-
-SSH into your instance and run the setup wizard:
+### Skip EC2 Creation (Re-configure Existing Instance)
 
 ```bash
-# Connect
-ssh ubuntu@<PUBLIC_IP>
-
-# Run interactive setup (choose LLM provider, API keys, etc.)
-hermes setup
-
-# Start chatting!
-hermes
+./deploy-hermes.sh --skip-ec2
 ```
 
-### Using Bedrock Models (Pre-configured)
+Reuses the instance from a previous deploy (reads `~/.hermes-deploy-info`). Useful for re-running the Bedrock configuration or WeChat login steps.
 
-If you deployed with Bedrock enabled (default), Hermes is **already configured** to use Claude via Bedrock. Just start chatting:
+### Cleanup All Resources
 
 ```bash
-hermes
+./cleanup-hermes.sh              # Interactive — confirm each step
+./cleanup-hermes.sh --force      # Non-interactive — delete everything
+./cleanup-hermes.sh --region us-west-2   # Target a specific region
 ```
 
-Switch models mid-conversation:
+Deletes: EC2 instance, SSH key pair, security group, IAM role/profile, and local deploy info.
 
-```
-/model custom:claude-sonnet    # Claude Sonnet 4
-/model custom:claude-opus      # Claude Opus 4
-/model custom:claude-haiku     # Claude 3.5 Haiku
-```
+## Configuration
 
-### Using Other Providers
+All settings can be overridden via environment variables or `~/.hermes-deploy.conf`:
 
-You can switch to any provider at any time:
+| Variable                    | Default                                        | Description                                        |
+| --------------------------- | ---------------------------------------------- | -------------------------------------------------- |
+| `HERMES_REGION`             | `ap-southeast-1`                               | AWS region (interactive selection if unset)        |
+| `HERMES_INSTANCE_TYPE`      | `c7g.xlarge`                                   | EC2 instance type (interactive selection if unset) |
+| `HERMES_BEDROCK_MODEL`      | `apac.anthropic.claude-sonnet-4-20250514-v1:0` | Bedrock model ID                                   |
+| `HERMES_VOLUME_SIZE`        | `30`                                           | EBS volume size in GiB                             |
+| `HERMES_KEY_NAME`           | `hermes-agent-key`                             | SSH key pair name                                  |
+| `HERMES_SG_NAME`            | `hermes-agent-sg`                              | Security group name                                |
+| `HERMES_IAM_ROLE`           | `hermes-agent-role`                            | IAM role name                                      |
+| `HERMES_IAM_PROFILE`        | `hermes-agent-profile`                         | Instance profile name                              |
+| `HERMES_CLOUD_INIT_TIMEOUT` | `900`                                          | Max seconds to wait for cloud-init                 |
+| `HERMES_SSH_TIMEOUT`        | `600`                                          | Max seconds to wait for SSH                        |
+
+Example config file (`~/.hermes-deploy.conf`):
 
 ```bash
-# OpenRouter (200+ models)
-hermes config set OPENROUTER_API_KEY sk-or-...
-hermes config set model.provider openrouter
-hermes config set model.default anthropic/claude-sonnet-4
-
-# Anthropic Direct
-hermes config set ANTHROPIC_API_KEY sk-ant-...
-hermes config set model.provider anthropic
-hermes config set model.default claude-sonnet-4
-
-# Or use the interactive selector
-hermes model
+HERMES_REGION=us-west-2
+HERMES_INSTANCE_TYPE=c7g.2xlarge
+HERMES_VOLUME_SIZE=50
 ```
 
-### Setting Up Messaging Gateway
+### Available Regions
 
-Connect Hermes to Telegram, Discord, or Slack:
+| Region           | Location    |
+| ---------------- | ----------- |
+| `ap-southeast-1` | Singapore   |
+| `ap-northeast-1` | Tokyo       |
+| `ap-northeast-2` | Seoul       |
+| `ap-south-1`     | Mumbai      |
+| `us-east-1`      | N. Virginia |
+| `us-west-2`      | Oregon      |
+| `eu-west-1`      | Ireland     |
+| `eu-central-1`   | Frankfurt   |
+
+### Available Instance Types
+
+| Type          | Specs          | Use Case                  |
+| ------------- | -------------- | ------------------------- |
+| `c7g.medium`  | 1 vCPU, 2 GiB  | Light testing             |
+| `c7g.large`   | 2 vCPU, 4 GiB  | Small scale               |
+| `c7g.xlarge`  | 4 vCPU, 8 GiB  | **Recommended**           |
+| `c7g.2xlarge` | 8 vCPU, 16 GiB | High concurrency          |
+| `m7g.xlarge`  | 4 vCPU, 16 GiB | Memory intensive          |
+| `m7g.2xlarge` | 8 vCPU, 32 GiB | Memory + high concurrency |
+
+## Project Structure
+
+```
+.
+├── deploy-hermes.sh          # Main deployment orchestrator
+├── cleanup-hermes.sh         # Resource cleanup script
+├── README.md
+└── scripts/
+    ├── userdata.sh           # EC2 cloud-init script (installs Hermes + deps)
+    ├── bedrock-patch.py      # Patches Hermes to support Bedrock Converse API
+    └── gateway-setup.sh      # Post-QR-login gateway configuration
+```
+
+Scripts in `scripts/` are uploaded to the EC2 instance via `scp` and executed remotely. They can also be run independently for debugging.
+
+## Post-Deploy
+
+### Connect to the Instance
 
 ```bash
-# Interactive setup
-hermes gateway setup
-
-# Enable as system service (auto-start on boot)
-sudo systemctl enable --now hermes-gateway
-
-# Check status
-sudo systemctl status hermes-gateway
-journalctl -u hermes-gateway -f
+ssh -i ~/.ssh/hermes-agent-key.pem ec2-user@<PUBLIC_IP>
+sudo su - hermes
+hermes    # Start interactive terminal
 ```
 
----
-
-## 📁 Templates
-
-| Template | File | Description |
-|----------|------|-------------|
-| **Full** | [`hermes-agent.yaml`](cloudformation/hermes-agent.yaml) | EC2 + IAM Role (Bedrock) + LiteLLM + systemd services |
-| **Minimal** | [`hermes-agent-minimal.yaml`](cloudformation/hermes-agent-minimal.yaml) | Just EC2 + Hermes Agent (no Bedrock, no IAM) |
-
-### Parameters (Full Template)
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `KeyPairName` | *(required)* | EC2 Key Pair for SSH |
-| `InstanceType` | `t3.medium` | Instance size (t3/m6i/c6i/g5) |
-| `VolumeSize` | `30` | EBS volume GB |
-| `SSHAllowCIDR` | `0.0.0.0/0` | SSH access CIDR |
-| `EnableBedrockAccess` | `true` | Create Bedrock IAM Role |
-| `InstallLiteLLM` | `true` | Install LiteLLM proxy |
-| `BedrockRegion` | `us-east-1` | Bedrock API region |
-| `DefaultBedrockModel` | `claude-sonnet` | Default model alias |
-| `HermesAgentBranch` | `main` | Git branch to install |
-
-### Instance Type Guide
-
-| Type | vCPU | RAM | Use Case | Monthly Cost* |
-|------|------|-----|----------|---------------|
-| `t3.micro` | 2 | 1 GB | Testing only | ~$8 |
-| `t3.small` | 2 | 2 GB | Light CLI use | ~$17 |
-| `t3.medium` | 2 | 4 GB | **Recommended** — CLI + Gateway | ~$38 |
-| `t3.large` | 2 | 8 GB | Heavy tool use + memory | ~$76 |
-| `m6i.large` | 2 | 8 GB | Sustained workloads | ~$82 |
-| `g5.xlarge` | 4 | 16 GB | Local model inference (GPU) | ~$895 |
-
-*Prices for ap-southeast-1, on-demand. Use Reserved/Spot for savings.
-
----
-
-## 🔧 Helper Scripts
+### Manage the Gateway
 
 ```bash
-# Deploy (interactive)
-./scripts/deploy.sh
-
-# Deploy with options
-./scripts/deploy.sh --region ap-southeast-1 --key my-key --ssh-cidr 1.2.3.4/32
-
-# Deploy minimal (no Bedrock)
-./scripts/deploy.sh --minimal --region us-east-1 --key my-key
-
-# Dry run (print command only)
-./scripts/deploy.sh --dry-run
-
-# Check stack status
-./scripts/status.sh hermes-agent ap-southeast-1
-
-# Tear down
-./scripts/teardown.sh hermes-agent ap-southeast-1
+sudo systemctl status hermes-gateway    # Check status
+sudo systemctl restart hermes-gateway   # Restart
+journalctl -u hermes-gateway -f         # Live logs
 ```
 
----
+### Re-login to WeChat
 
-## 🔐 Security
-
-### What's Secured
-
-- **EBS encryption** — Root volume encrypted at rest
-- **Security Group** — Only SSH (port 22) exposed
-- **IAM least-privilege** — Bedrock role only has `InvokeModel` + `ListFoundationModels`
-- **LiteLLM** — Listens on `localhost:4000` only (not exposed to internet)
-- **SSM** — Session Manager enabled for keyless console access
-
-### Recommendations
-
-1. **Restrict SSH CIDR** — Use `YOUR_IP/32` instead of `0.0.0.0/0`
-2. **Enable Bedrock Guardrails** — Add content filters in the Bedrock console
-3. **Use SSM** — Connect via Session Manager instead of SSH for audit logging
-
----
-
-## 🛠️ Troubleshooting
-
-### Check Installation Progress
+If the WeChat session expires, re-run the QR login:
 
 ```bash
-ssh ubuntu@<IP> "tail -f /var/log/hermes-install.log"
+./deploy-hermes.sh --skip-ec2
 ```
 
-### LiteLLM Not Working
+## How the Bedrock Patch Works
 
-```bash
-# Check service status
-sudo systemctl status litellm
-journalctl -u litellm --no-pager -n 50
+Hermes Agent natively supports OpenAI-compatible APIs. The `bedrock-patch.py` script adds a Bedrock adapter by patching `auxiliary_client.py` to:
 
-# Verify Bedrock access
-aws bedrock list-foundation-models --region us-east-1 --query 'modelSummaries[?contains(modelId,`claude`)].modelId'
+1. Add `BedrockAuxiliaryClient` — wraps the Bedrock Converse API behind an OpenAI-compatible interface
+2. Register the async variant in `_to_async_client()`
+3. Handle `aws_sdk` auth type in `resolve_provider_client()`
 
-# Test LiteLLM directly
-curl http://localhost:4000/v1/models
-```
+The patch is idempotent — running it multiple times is safe. It will skip if already applied and report clear errors if the Hermes version is incompatible.
 
-### Bedrock Access Denied
+## Security Notes
 
-1. Verify the IAM Role has Bedrock permissions:
-   ```bash
-   aws iam list-attached-role-policies --role-name hermes-agent-role
-   ```
-2. Ensure model access is enabled in [Bedrock Console](https://console.aws.amazon.com/bedrock/home#/modelaccess)
-3. Check the Bedrock region matches where models are enabled
+- The security group opens **port 22 to 0.0.0.0/0** by default. For production use, restrict the SSH source IP in the AWS console or override `HERMES_SG_NAME` with a pre-configured security group.
+- The IAM role grants Bedrock invoke permissions with `Resource: *`. Consider restricting to specific model ARNs for tighter access control.
+- IMDSv2 is enforced (`HttpTokens=required`) and EBS volumes are encrypted by default.
 
-### Hermes Command Not Found
+## Troubleshooting
 
-```bash
-source ~/.bashrc
-# or
-export PATH="$HOME/.local/bin:$PATH"
-```
-
----
-
-## 💰 Cost Estimate
-
-| Component | Monthly (ap-southeast-1) |
-|-----------|-------------------------|
-| EC2 `t3.medium` (on-demand) | ~$38 |
-| EBS 30GB gp3 | ~$2.40 |
-| Bedrock Claude Sonnet (moderate use) | ~$10–50 |
-| **Total** | **~$50–90** |
-
-> 💡 **Cost saving tips:**
-> - Use **Spot Instances** for ~60% savings (add `SpotPrice` to the template)
-> - Use **Reserved Instances** for ~40% savings on 1-year commitment
-> - Set Bedrock **token budgets** in cdk.json or via Bedrock console
-
----
-
-## 🗑️ Cleanup
-
-```bash
-# Delete everything created by this stack
-./scripts/teardown.sh hermes-agent ap-southeast-1
-
-# Or via AWS CLI
-aws cloudformation delete-stack --stack-name hermes-agent --region ap-southeast-1
-```
-
-This removes the EC2 instance, security group, IAM role, and all associated resources.
-
----
-
-## 📚 References
-
-- [Hermes Agent Documentation](https://hermes-agent.nousresearch.com/docs/)
-- [Hermes Agent GitHub](https://github.com/NousResearch/hermes-agent)
-- [AWS Bedrock Model Access](https://docs.aws.amazon.com/bedrock/latest/userguide/model-access.html)
-- [LiteLLM Bedrock Integration](https://docs.litellm.ai/docs/providers/bedrock)
-
----
+| Issue                              | Solution                                                                                                                          |
+| ---------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| Bedrock test fails                 | Ensure model access is enabled in the [Bedrock console](https://console.aws.amazon.com/bedrock/home#/modelaccess) for your region |
+| SSH timeout                        | Check security group rules and that the instance has a public IP                                                                  |
+| cloud-init error                   | SSH in and check `/var/log/hermes-setup.log`                                                                                      |
+| WeChat QR not showing              | Ensure your terminal supports the QR display; try a larger terminal window                                                        |
+| Gateway shows "No user allowlists" | Re-run `./deploy-hermes.sh --skip-ec2` to reconfigure the gateway                                                                 |
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
-
-Built with ☤ [Hermes Agent](https://github.com/NousResearch/hermes-agent) by [Nous Research](https://nousresearch.com).
+MIT
