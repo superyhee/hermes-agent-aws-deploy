@@ -36,7 +36,7 @@ KEY_FILE="$HOME/.ssh/${KEY_NAME}.pem"
 SG_NAME="${HERMES_SG_NAME:-hermes-agent-sg}"
 IAM_ROLE="${HERMES_IAM_ROLE:-hermes-agent-role}"
 IAM_PROFILE="${HERMES_IAM_PROFILE:-hermes-agent-profile}"
-BEDROCK_MODEL="${HERMES_BEDROCK_MODEL:-apac.anthropic.claude-sonnet-4-20250514-v1:0}"
+BEDROCK_MODEL="${HERMES_BEDROCK_MODEL:-global.anthropic.claude-sonnet-4-6}"
 VOLUME_SIZE="${HERMES_VOLUME_SIZE:-30}"
 HERMES_USER="hermes"
 CLOUD_INIT_TIMEOUT="${HERMES_CLOUD_INIT_TIMEOUT:-900}"  # 15 min max
@@ -130,6 +130,32 @@ select_instance_type() {
     fi
 }
 
+# Model selection
+select_model() {
+    echo ""
+    echo -e "${BOLD}Select Bedrock Model:${NC}"
+    echo ""
+    local models=(
+        "global.anthropic.claude-sonnet-4-6|Claude Sonnet 4.6 — Recommended (default)"
+        "global.anthropic.claude-opus-4-7|Claude Opus 4.7 — Most capable"
+        "global.anthropic.claude-opus-4-6-v1|Claude Opus 4.6"
+    )
+    local i=1
+    for entry in "${models[@]}"; do
+        local code="${entry%%|*}"
+        local label="${entry##*|}"
+        local marker="  "
+        [[ "$code" == "$BEDROCK_MODEL" ]] && marker="${GREEN}▸ ${NC}"
+        printf "    ${marker}%d) %-44s %s\n" "$i" "$code" "$label"
+        (( i++ ))
+    done
+    echo ""
+    read -p "  Enter number [default: ${BEDROCK_MODEL}]: " choice
+    if [[ -n "$choice" && "$choice" =~ ^[0-9]+$ && "$choice" -ge 1 && "$choice" -le ${#models[@]} ]]; then
+        BEDROCK_MODEL="${models[$((choice-1))]%%|*}"
+    fi
+}
+
 # Only show interactive menus for full deploy (not --skip-ec2) and when not pre-configured
 if [[ "${1:-}" != "--skip-ec2" ]]; then
     # Show selection if no explicit env var / config override was set
@@ -139,9 +165,13 @@ if [[ "${1:-}" != "--skip-ec2" ]]; then
     if [[ -z "${HERMES_INSTANCE_TYPE:-}" ]]; then
         select_instance_type
     fi
-    echo ""
-    log "Region: ${REGION}, Instance: ${INSTANCE_TYPE}"
 fi
+
+# Model selection always shows (both full deploy and --skip-ec2)
+select_model
+
+echo ""
+log "Region: ${REGION}, Model: ${BEDROCK_MODEL}"
 
 # ---------------------------------------------------------------------------
 # Pre-flight checks
@@ -298,10 +328,12 @@ REGION=${REGION}
 EOF
 
 else
-    # --skip-ec2: load existing instance info
+    # --skip-ec2: load existing instance info (only connectivity fields, not model config)
     step "Loading Existing Instance"
     if [[ -f "$HOME/.hermes-deploy-info" ]]; then
+        _SAVED_MODEL="${BEDROCK_MODEL}"
         source "$HOME/.hermes-deploy-info"
+        BEDROCK_MODEL="${_SAVED_MODEL}"
         log "Using existing instance: ${INSTANCE_ID} (${PUBLIC_IP})"
     else
         err "No deploy info found. Run without --skip-ec2 first."
@@ -309,8 +341,10 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 5. Wait for Installation to Complete
+# 5. Wait for Installation to Complete (skip for --skip-ec2)
 # ---------------------------------------------------------------------------
+if [[ "${1:-}" != "--skip-ec2" ]]; then
+
 step "5/7 — Waiting for Hermes Installation"
 
 SSH_INTERVAL=10
@@ -345,10 +379,22 @@ if [[ -z "$HERMES_VER" ]]; then
 fi
 log "Installed: ${HERMES_VER}"
 
+else
+    # --skip-ec2: just verify SSH connectivity
+    step "Verifying SSH Connectivity"
+    if ! ssh_cmd "echo ok" >/dev/null 2>&1; then
+        err "Cannot connect to ${PUBLIC_IP}. Check that the instance is running."
+    fi
+    log "SSH connected to ${PUBLIC_IP}"
+fi
+
 # ---------------------------------------------------------------------------
 # 6. Configure Hermes for Bedrock
 # ---------------------------------------------------------------------------
 step "6/7 — Configuring Hermes for AWS Bedrock"
+
+# Fix permission errors: hermes user needs to traverse /home/ec2-user when searching for .git
+ssh_cmd "sudo rm -rf /home/ec2-user/.git; sudo chmod 755 /home/ec2-user" 2>/dev/null || true
 
 # Update config.yaml for Bedrock provider
 ssh_cmd << REMOTE_CFG
@@ -369,6 +415,17 @@ PATCH_FILE="${SCRIPT_DIR}/scripts/bedrock-patch.py"
 scp -o StrictHostKeyChecking=no -i "$KEY_FILE" "$PATCH_FILE" "ec2-user@${PUBLIC_IP}:/tmp/bedrock-patch.py"
 ssh_cmd "sudo su - hermes -c 'source ~/.hermes/hermes-agent/venv/bin/activate && cd ~/.hermes/hermes-agent && python3 /tmp/bedrock-patch.py'"
 log "Bedrock auxiliary patch applied"
+
+# Install runtime patch (survives Hermes updates via sitecustomize.py)
+RUNTIME_PATCH="${SCRIPT_DIR}/scripts/bedrock_runtime_patch.py"
+[[ -f "$RUNTIME_PATCH" ]] || err "Missing ${RUNTIME_PATCH}"
+scp -o StrictHostKeyChecking=no -i "$KEY_FILE" "$RUNTIME_PATCH" "ec2-user@${PUBLIC_IP}:/tmp/bedrock_runtime_patch.py"
+ssh_cmd << 'RUNTIME_PATCH_CMD'
+SITE_PACKAGES=$(sudo su - hermes -c 'source ~/.hermes/hermes-agent/venv/bin/activate && python3 -c "import site; print(site.getsitepackages()[0])"')
+sudo cp /tmp/bedrock_runtime_patch.py "$SITE_PACKAGES/sitecustomize.py"
+sudo chown hermes:hermes "$SITE_PACKAGES/sitecustomize.py"
+RUNTIME_PATCH_CMD
+log "Runtime patch installed (survives Hermes updates)"
 
 # Setup sudoers for hermes user
 ssh_cmd << 'SUDOERS_CMD'

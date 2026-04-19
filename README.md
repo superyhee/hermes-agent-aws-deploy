@@ -108,7 +108,7 @@ $ ./deploy-hermes.sh
 [✓] Installed: hermes-agent 0.3.x
 
 ══ 6/7 — Configuring Hermes for AWS Bedrock ══
-[✓] Bedrock provider configured (model: apac.anthropic.claude-sonnet-4-20250514-v1:0)
+[✓] Bedrock provider configured (model: global.anthropic.claude-sonnet-4-6)
 Bedrock auxiliary patch applied successfully
 [✓] Bedrock auxiliary patch applied
 [✓] Sudoers configured for gateway management
@@ -142,7 +142,7 @@ Bedrock auxiliary patch applied successfully
     Instance ID:  i-0a1b2c3d4e5f67890
     Public IP:    13.212.xxx.xxx
     Region:       ap-southeast-1
-    Model:        apac.anthropic.claude-sonnet-4-20250514-v1:0
+    Model:        global.anthropic.claude-sonnet-4-6
 
   Connect
     ssh -i ~/.ssh/hermes-agent-key.pem ec2-user@13.212.xxx.xxx
@@ -195,7 +195,7 @@ All settings can be overridden via environment variables or `~/.hermes-deploy.co
 | --------------------------- | ---------------------------------------------- | -------------------------------------------------- |
 | `HERMES_REGION`             | `ap-southeast-1`                               | AWS region (interactive selection if unset)        |
 | `HERMES_INSTANCE_TYPE`      | `c7g.xlarge`                                   | EC2 instance type (interactive selection if unset) |
-| `HERMES_BEDROCK_MODEL`      | `apac.anthropic.claude-sonnet-4-20250514-v1:0` | Bedrock model ID                                   |
+| `HERMES_BEDROCK_MODEL`      | `global.anthropic.claude-sonnet-4-6` | Bedrock model ID                                   |
 | `HERMES_VOLUME_SIZE`        | `30`                                           | EBS volume size in GiB                             |
 | `HERMES_KEY_NAME`           | `hermes-agent-key`                             | SSH key pair name                                  |
 | `HERMES_SG_NAME`            | `hermes-agent-sg`                              | Security group name                                |

@@ -22,7 +22,7 @@ export AWS_PAGER=""
 # ---------------------------------------------------------------------------
 # Parse arguments
 # ---------------------------------------------------------------------------
-FORCE=false
+FORCE=true
 CLI_REGION=""
 
 while [[ $# -gt 0 ]]; do
@@ -89,11 +89,6 @@ else
     warn "Will scan for hermes-agent tagged instances"
 fi
 
-if ! $FORCE; then
-    echo -e "  ${RED}${BOLD}This action is irreversible.${NC}"
-    read -p "  Type 'DELETE' to proceed: " confirmation
-    [[ "$confirmation" == "DELETE" ]] || { echo "Aborted."; exit 0; }
-fi
 
 # ---------------------------------------------------------------------------
 # 1. Terminate EC2 Instance(s)

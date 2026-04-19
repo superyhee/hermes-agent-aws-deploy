@@ -20,6 +20,9 @@ useradd -m -s /bin/bash hermes || true
 mkdir -p /home/hermes/.hermes
 chown -R hermes:hermes /home/hermes
 
+# Allow hermes user to traverse /home/ec2-user (prevents PermissionError during git repo search)
+chmod 755 /home/ec2-user
+
 # Install as hermes user
 su - hermes << 'INSTALL_EOF'
 set -euxo pipefail

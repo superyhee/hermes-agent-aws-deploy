@@ -3,15 +3,12 @@
 Bedrock Auxiliary Client Patch for Hermes Agent
 ================================================
 Patches agent/auxiliary_client.py to add AWS Bedrock Converse API support.
+Patches agent/anthropic_adapter.py to preserve dots in Bedrock model IDs.
+Patches run_agent.py to add "bedrock" to _anthropic_preserve_dots().
 
 Usage (run inside hermes-agent venv):
     cd ~/.hermes/hermes-agent
     python3 /tmp/bedrock-patch.py
-
-The patch adds:
-  1. BedrockAuxiliaryClient / AsyncBedrockAuxiliaryClient classes
-  2. Bedrock branch in _to_async_client()
-  3. aws_sdk auth_type handler in resolve_provider_client()
 """
 
 import os
@@ -19,7 +16,9 @@ import sys
 
 FILEPATH = "agent/auxiliary_client.py"
 
-def main():
+
+def patch_auxiliary_client():
+    """Steps 1-3: Add BedrockAuxiliaryClient to auxiliary_client.py."""
     if not os.path.isfile(FILEPATH):
         print(f"ERROR: {FILEPATH} not found. Run this from the hermes-agent root.", file=sys.stderr)
         sys.exit(1)
@@ -27,15 +26,12 @@ def main():
     with open(FILEPATH, "r") as f:
         content = f.read()
 
-    # Guard: skip if already patched
     if "BedrockAuxiliaryClient" in content:
-        print("Bedrock auxiliary patch already applied — skipping")
+        print("Steps 1-3: Bedrock auxiliary patch already applied — skipping")
         return
 
-    # -------------------------------------------------------------------------
-    # 1. Add BedrockAuxiliaryClient classes after AsyncCodexAuxiliaryClient
-    # -------------------------------------------------------------------------
-    bedrock_classes = """
+    # Step 1: Add BedrockAuxiliaryClient classes
+    bedrock_classes = '''
 
 
 # ---------------------------------------------------------------------------
@@ -44,7 +40,7 @@ def main():
 
 
 class _BedrockCompletionsAdapter:
-    \"\"\"Translate chat.completions.create() kwargs to Bedrock Converse API.\"\"\"
+    """Translate chat.completions.create() kwargs to Bedrock Converse API."""
 
     def __init__(self, region: str, default_model: str):
         self._region = region
@@ -63,7 +59,7 @@ class _BedrockChatShim:
     def __init__(self, adapter): self.completions = adapter
 
 class BedrockAuxiliaryClient:
-    \"\"\"OpenAI-client-compatible wrapper for Bedrock Converse API.\"\"\"
+    """OpenAI-client-compatible wrapper for Bedrock Converse API."""
     def __init__(self, region: str, default_model: str):
         self.chat = _BedrockChatShim(_BedrockCompletionsAdapter(region, default_model))
         self.api_key = "aws-sdk"
@@ -84,21 +80,19 @@ class AsyncBedrockAuxiliaryClient:
         self.chat = _AsyncBedrockChatShim(_AsyncBedrockCompletionsAdapter(sync_wrapper.chat.completions))
         self.api_key = sync_wrapper.api_key
         self.base_url = sync_wrapper.base_url
-"""
+'''
 
     marker = "class AsyncCodexAuxiliaryClient:"
     idx = content.find(marker)
     if idx == -1:
-        print("ERROR: Could not find AsyncCodexAuxiliaryClient class — hermes-agent version may be incompatible", file=sys.stderr)
+        print("ERROR: Could not find AsyncCodexAuxiliaryClient class", file=sys.stderr)
         sys.exit(1)
 
     next_blank = content.find("\n\n", idx + len(marker))
     if next_blank != -1:
         content = content[:next_blank] + bedrock_classes + content[next_blank:]
 
-    # -------------------------------------------------------------------------
-    # 2. Add Bedrock to _to_async_client
-    # -------------------------------------------------------------------------
+    # Step 2: Add Bedrock to _to_async_client
     old_async = (
         "    if isinstance(sync_client, AnthropicAuxiliaryClient):\n"
         "        return AsyncAnthropicAuxiliaryClient(sync_client), model"
@@ -113,9 +107,7 @@ class AsyncBedrockAuxiliaryClient:
     else:
         content = content.replace(old_async, new_async, 1)
 
-    # -------------------------------------------------------------------------
-    # 3. Add aws_sdk auth_type handler in resolve_provider_client
-    # -------------------------------------------------------------------------
+    # Step 3: Add aws_sdk auth_type handler in resolve_provider_client
     old_block = (
         '    logger.warning("resolve_provider_client: unhandled auth_type %s for %s",\n'
         '                   pconfig.auth_type, provider)\n'
@@ -132,7 +124,7 @@ class AsyncBedrockAuxiliaryClient:
         '            _base = str(explicit_base_url or "")\n'
         '            _match = _re.search(r"bedrock-runtime\\.([a-z0-9-]+)\\.", _base)\n'
         '            if _match: _region = _match.group(1)\n'
-        '            _default_model = model or "apac.anthropic.claude-sonnet-4-20250514-v1:0"\n'
+        '            _default_model = model or "global.anthropic.claude-sonnet-4-6"\n'
         '            _client = BedrockAuxiliaryClient(_region, _default_model)\n'
         '            if async_mode: return AsyncBedrockAuxiliaryClient(_client), _default_model\n'
         '            return _client, _default_model\n'
@@ -151,8 +143,86 @@ class AsyncBedrockAuxiliaryClient:
 
     with open(FILEPATH, "w") as f:
         f.write(content)
+    print("Steps 1-3: Bedrock auxiliary patch applied to auxiliary_client.py")
 
-    print("Bedrock auxiliary patch applied successfully")
+
+def patch_normalize_model_name():
+    """Step 4: Patch normalize_model_name in anthropic_adapter.py."""
+    adapter_file = "agent/anthropic_adapter.py"
+    if not os.path.isfile(adapter_file):
+        print(f"WARNING: {adapter_file} not found — skipping step 4", file=sys.stderr)
+        return
+
+    with open(adapter_file, "r") as f:
+        content = f.read()
+
+    if "[BEDROCK PATCH]" in content:
+        print("Step 4: normalize_model_name bedrock patch already applied — skipping")
+        return
+
+    marker = "def normalize_model_name(model: str, preserve_dots: bool = False) -> str:"
+    if marker not in content:
+        print("WARNING: Could not find normalize_model_name — skipping step 4", file=sys.stderr)
+        return
+
+    bedrock_guard = (
+        '    # [BEDROCK PATCH] Preserve dots for Bedrock inference profile IDs\n'
+        '    if not preserve_dots and "." in model:\n'
+        '        _lower = model.lower()\n'
+        '        for _pfx in ("global.", "us.", "eu.", "ap.", "apac."):\n'
+        '            if _lower.startswith(_pfx) and "anthropic." in _lower:\n'
+        '                preserve_dots = True\n'
+        '                break\n'
+    )
+
+    fn_start = content.index(marker)
+    # Find the closing triple-quote of the docstring
+    first_triple = content.find('"""', fn_start + len(marker))
+    if first_triple == -1:
+        print("WARNING: Could not find docstring in normalize_model_name — skipping", file=sys.stderr)
+        return
+    second_triple = content.find('"""', first_triple + 3)
+    if second_triple == -1:
+        print("WARNING: Could not find docstring end — skipping", file=sys.stderr)
+        return
+
+    insert_pos = content.find("\n", second_triple) + 1
+    content = content[:insert_pos] + bedrock_guard + content[insert_pos:]
+
+    with open(adapter_file, "w") as f:
+        f.write(content)
+    print("Step 4: normalize_model_name bedrock patch applied to anthropic_adapter.py")
+
+
+def patch_preserve_dots_provider():
+    """Step 5: Add 'bedrock' to _anthropic_preserve_dots in run_agent.py."""
+    run_agent = "run_agent.py"
+    if not os.path.isfile(run_agent):
+        print(f"WARNING: {run_agent} not found — skipping step 5", file=sys.stderr)
+        return
+
+    with open(run_agent, "r") as f:
+        content = f.read()
+
+    old_providers = '"alibaba", "minimax", "minimax-cn", "opencode-go", "opencode-zen", "zai"}'
+    new_providers = '"alibaba", "minimax", "minimax-cn", "opencode-go", "opencode-zen", "zai", "bedrock"}'
+
+    if old_providers in content:
+        content = content.replace(old_providers, new_providers, 1)
+        with open(run_agent, "w") as f:
+            f.write(content)
+        print("Step 5: Bedrock preserve_dots patch applied to run_agent.py")
+    elif new_providers in content:
+        print("Step 5: Bedrock preserve_dots patch already applied — skipping")
+    else:
+        print("WARNING: Could not find preserve_dots provider set in run_agent.py", file=sys.stderr)
+
+
+def main():
+    patch_auxiliary_client()
+    patch_normalize_model_name()
+    patch_preserve_dots_provider()
+    print("\nAll bedrock patches applied successfully.")
 
 
 if __name__ == "__main__":
